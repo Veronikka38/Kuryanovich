@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException, status
-from p
-ydantic import (BaseModel)
+from pydantic import BaseModel
 from typing import List
 
 app = FastAPI(title="Schedule Service API")
