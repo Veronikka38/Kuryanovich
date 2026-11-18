@@ -1,4 +1,6 @@
 import java.io.IOException;
+import java.io.StringWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,63 +15,110 @@ public class ShiftPlanFixed {
     private static final DateTimeFormatter DATE_FORMAT =
             DateTimeFormatter.ofPattern("dd.MM.yyyy");
 
-    public static void main(String[] args) throws IOException {
+    private static int failedChecks = 0;
 
+    public static void main(String[] args) {
         List<Brigade> brigades = new ArrayList<>();
         brigades.add(new Brigade("Иванов", 11.0, true));
         brigades.add(new Brigade("Петров", 0.0, true));
         brigades.add(new Brigade("Сидоров", 4.5, false));
         brigades.add(new Brigade("Козлов", 8.0, true));
 
-        runTests();
+        try {
+            runTests();
 
-        System.out.println("Сформированный наряд:");
-        System.out.println(make(brigades, 2));
+            String result = make(brigades, 2);
 
-        System.out.println("Журнал: " +
-                DATE_FORMAT.format(LocalDate.now()) +
-                " наряд сформирован");
+            // Путь к файлу задаётся в main, а не внутри make.
+            Files.writeString(
+                    Path.of("наряд.txt"),
+                    result,
+                    StandardCharsets.UTF_8
+            );
+
+            System.out.println("Сформированный наряд:");
+            System.out.println(result);
+            System.out.println("Журнал: "
+                    + DATE_FORMAT.format(LocalDate.now())
+                    + " наряд сформирован");
+
+        } catch (IOException e) {
+            System.err.println(
+                    "Не удалось записать наряд в файл: "
+                            + e.getMessage()
+            );
+        } catch (IllegalArgumentException e) {
+            System.err.println("Не удалось сформировать наряд: "
+                    + e.getMessage());
+        } catch (AssertionError e) {
+            System.err.println("Обнаружены ошибки в тестах: "
+                    + e.getMessage());
+        }
     }
 
-    public static String make(List<Brigade> brigades, int need)
-            throws IOException {
+    /**
+     * Формирует наряд и возвращает его в виде строки.
+     * Метод не выполняет файловых операций.
+     */
+    public static String make(List<Brigade> brigades, int need) {
 
         if (brigades == null) {
             throw new IllegalArgumentException(
-                    "Список бригад не должен быть null");
+                    "Список бригад не должен быть null"
+            );
         }
 
         if (need <= 0) {
             throw new IllegalArgumentException(
-                    "Количество бригад должно быть положительным");
+                    "Количество бригад должно быть положительным"
+            );
         }
 
-        // Создаём новый список, не изменяя исходный.
+        // Исходный список не изменяется.
         List<Brigade> suitable = new ArrayList<>();
+        List<String> rejected = new ArrayList<>();
 
         for (Brigade brigade : brigades) {
 
             if (brigade == null) {
-                throw new IllegalArgumentException(
-                        "Список содержит пустую бригаду");
+                rejected.add("Неизвестная бригада: запись равна null");
+                continue;
             }
 
-            if (brigade.hoursPerShift < 0 ||
-                    Double.isNaN(brigade.hoursPerShift)) {
-                throw new IllegalArgumentException(
-                        "Количество часов указано некорректно");
+            if (!Double.isFinite(brigade.hoursPerShift)
+                    || brigade.hoursPerShift < 0) {
+                rejected.add(brigade.lastName
+                        + " — некорректные данные о количестве часов");
+                continue;
             }
 
-            if (brigade.admitted &&
-                    brigade.hoursPerShift <= MAX_HOURS) {
-                suitable.add(brigade);
+            if (!brigade.admitted) {
+                rejected.add(brigade.lastName + " — не допущен");
+                continue;
             }
+
+            if (brigade.hoursPerShift > MAX_HOURS) {
+                rejected.add(brigade.lastName
+                        + " — превышены допустимые часы ("
+                        + brigade.hoursPerShift + ")");
+                continue;
+            }
+
+            suitable.add(brigade);
         }
 
         if (suitable.size() < need) {
+            String details = rejected.isEmpty()
+                    ? " Причины фильтрации отсутствуют."
+                    : " Отфильтрованные бригады: "
+                            + String.join("; ", rejected);
+
             throw new IllegalArgumentException(
                     "Недостаточно подходящих бригад. Доступно: "
-                    + suitable.size() + ", требуется: " + need);
+                            + suitable.size()
+                            + ", требуется: " + need + "."
+                            + details
+            );
         }
 
         StringBuilder result = new StringBuilder();
@@ -79,24 +128,35 @@ public class ShiftPlanFixed {
                     .append("; ");
         }
 
-        // Автоматическое закрытие файла.
-        try (var writer = Files.newBufferedWriter(
-                Path.of("наряд.txt"),
-                StandardCharsets.UTF_8)) {
-
-            writer.write(result.toString());
-        }
-
         return result.toString();
     }
 
-    // Метод автоматической проверки.
+    /**
+     * Формирует наряд и записывает его в переданный Writer.
+     * Вызывающий код сам отвечает за создание и закрытие Writer.
+     */
+    public static String make(
+            List<Brigade> brigades, int need, Writer writer)
+            throws IOException {
+
+        if (writer == null) {
+            throw new IllegalArgumentException(
+                    "Writer не должен быть null"
+            );
+        }
+
+        String result = make(brigades, need);
+        writer.write(result);
+        return result;
+    }
+
+    // Проверка без немедленного прерывания тестирования.
     public static void check(String name, boolean condition) {
         if (condition) {
             System.out.println("[OK] " + name);
         } else {
             System.out.println("[FAIL] " + name);
-            throw new AssertionError(name);
+            failedChecks++;
         }
     }
 
@@ -104,18 +164,23 @@ public class ShiftPlanFixed {
     public static void checkException(
             String name, Runnable action) {
 
+        boolean exceptionThrown = false;
+
         try {
             action.run();
-            check(name, false);
         } catch (IllegalArgumentException e) {
-            check(name, true);
+            exceptionThrown = true;
+        } catch (Exception e) {
+            // Неожиданное исключение также означает провал теста.
         }
+
+        check(name, exceptionThrown);
     }
 
-    public static void runTests() throws IOException {
+    public static void runTests() {
+        failedChecks = 0;
 
         List<Brigade> testBrigades = new ArrayList<>();
-
         testBrigades.add(new Brigade("Иванов", 11.0, true));
         testBrigades.add(new Brigade("Петров", 0.0, true));
         testBrigades.add(new Brigade("Сидоров", 4.5, false));
@@ -130,58 +195,72 @@ public class ShiftPlanFixed {
         check("Исходный список не изменён",
                 testBrigades.size() == 4);
 
-        // Тест 3. Проверка недостаточного количества бригад.
+        // Тест 3. Недостаточное количество бригад.
         checkException("Проверка недостаточного количества",
-                () -> {
-                    try {
-                        make(testBrigades, 3);
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
+                () -> make(testBrigades, 3));
 
-        // Тест 4. Проверка отрицательного количества бригад.
+        // Тест 4. Отрицательное количество бригад.
         checkException("Проверка отрицательного количества",
-                () -> {
-                    try {
-                        make(testBrigades, -1);
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
+                () -> make(testBrigades, -1));
 
-        // Тест 5. Проверка пустого списка (null).
+        // Тест 5. Передача null вместо списка.
         checkException("Проверка null",
-                () -> {
-                    try {
-                        make(null, 1);
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
+                () -> make(null, 1));
 
-        // Тест 6. Проверка некорректных часов.
-        List<Brigade> invalid = new ArrayList<>();
-        invalid.add(new Brigade("Тест", -5.0, true));
+        // Тест 6. Отрицательное количество часов.
+        List<Brigade> invalidHours = new ArrayList<>();
+        invalidHours.add(new Brigade("Тест", -5.0, true));
 
         checkException("Проверка отрицательных часов",
-                () -> {
-                    try {
-                        make(invalid, 1);
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
+                () -> make(invalidHours, 1));
 
-        // Тест 7. Проверка сохранения файла.
-        String saved = Files.readString(
-                Path.of("наряд.txt"),
-                StandardCharsets.UTF_8);
+        // Тест 7. Проверка NaN.
+        List<Brigade> nanHours = new ArrayList<>();
+        nanHours.add(new Brigade(
+                "Тест NaN", Double.NaN, true));
 
-        check("Проверка записи файла",
-                saved.equals("Петров; Козлов; "));
+        checkException("Проверка NaN",
+                () -> make(nanHours, 1));
 
-        System.out.println("Все тесты выполнены.");
+        // Тест 8. Проверка положительной бесконечности.
+        List<Brigade> infiniteHours = new ArrayList<>();
+        infiniteHours.add(new Brigade(
+                "Тест Infinity", Double.POSITIVE_INFINITY, true));
+
+        checkException("Проверка положительной бесконечности",
+                () -> make(infiniteHours, 1));
+
+        // Тест 9. Проверка отрицательной бесконечности.
+        List<Brigade> negativeInfinityHours = new ArrayList<>();
+        negativeInfinityHours.add(new Brigade(
+                "Тест -Infinity", Double.NEGATIVE_INFINITY, true));
+
+        checkException("Проверка отрицательной бесконечности",
+                () -> make(negativeInfinityHours, 1));
+
+        // Тест 10. Запись через переданный Writer, без реального файла.
+        StringWriter testWriter = new StringWriter();
+        try {
+            String writerResult = make(
+                    testBrigades, 2, testWriter);
+
+            check("Проверка записи через Writer",
+                    writerResult.equals("Петров; Козлов; ")
+                            && testWriter.toString().equals(
+                                    "Петров; Козлов; "));
+        } catch (IOException e) {
+            check("Проверка записи через Writer", false);
+        }
+
+        // Итог: сообщаем обо всех проваленных проверках сразу.
+        if (failedChecks > 0) {
+            throw new AssertionError(
+                    "Количество проваленных проверок: "
+                            + failedChecks
+            );
+        }
+
+        System.out.println("Все тесты выполнены успешно.");
     }
 }
 
